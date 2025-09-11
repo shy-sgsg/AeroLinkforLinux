@@ -18,7 +18,8 @@ SOURCES += \
     main.cpp \
     mainwindow.cpp \
     message_transfer.cpp \
-    package_sar_data.cpp
+    package_sar_data.cpp \
+    tcp_server_thread.cpp
 
 HEADERS += \
     AuxFileReader.h \
@@ -28,7 +29,9 @@ HEADERS += \
     logmanager.h \
     mainwindow.h \
     message_transfer.h \
-    package_sar_data.h
+    package_sar_data.h \
+    radar_protocol.h \
+    tcp_server_thread.h
 
 FORMS += \
     mainwindow.ui

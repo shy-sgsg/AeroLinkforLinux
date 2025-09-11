@@ -1,5 +1,3 @@
-#include "mainwindow.h"
-#include "ui_mainwindow.h"
 #include <QDebug>
 #include <QMessageBox>
 #include <QFile>
@@ -9,13 +7,15 @@
 #include <QFileDialog>
 #include <QTimer>
 #include <QButtonGroup>
-#include "logmanager.h"
 #include <QImageReader>
 #include <QThread>
+#include "logmanager.h"
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include "radar_protocol.h"
 #include "image_transfer.h"
 #include "file_monitor.h"
 #include "message_transfer.h"
-#include "package_sar_data.h"
 
 QString mainFolderPath = "E:/AIR/小长ISAR/实时数据回传/data";
 
@@ -55,21 +55,173 @@ MainWindow::MainWindow(QWidget *parent)
 
     qRegisterMetaType<qint64>("qint64");
 
-    // 初始化消息传输类
-    m_messageTransfer = new MessageTransfer(this);
-    connect(m_messageTransfer, &MessageTransfer::logMessage, this, &MainWindow::onLogMessage);
+    // 设置TCP服务器线程
+    m_serverThread = new QThread(this);
+    m_tcpServerThreadObject = new TcpServerThread();
+    m_tcpServerThreadObject->moveToThread(m_serverThread);
 
-    const std::string inputFileName1 = "E:/AIR/raw_data_20250908_214537.bin";
-    const std::string outputFileName1 = "E:/AIR/raw_data_20250908_214537.jpg";
+    // 连接主窗口的槽函数到服务器状态变化信号
+    // 您需要在 TcpServerThread 中添加这些信号
+    connect(m_tcpServerThreadObject, &TcpServerThread::serverStarted, this, &MainWindow::onServerStarted);
+    connect(m_tcpServerThreadObject, &TcpServerThread::serverStopped, this, &MainWindow::onServerStopped);
+    connect(m_tcpServerThreadObject, &TcpServerThread::logMessage, this, &MainWindow::onLogMessage);
+    connect(m_tcpServerThreadObject, &TcpServerThread::receivedImageData, this, &MainWindow::onReceivedImageData);
+
+    // 启动线程
+    m_serverThread->start();
+
+    // 初始化按钮状态
+    ui->toggleServerButton->setText("启动服务器");
+    ui->toggleServerButton->setEnabled(true);
+
+    m_testSocket = new QTcpSocket(this);
+
+    // const std::string inputFileName1 = "E:/AIR/raw_data_20250908_214537.bin";
+    // const std::string outputFileName1 = "E:/AIR/raw_data_20250908_214537.jpg";
 //     const std::string inputFileName2 = "E:/AIR/raw_data_20250907_130209.bin";
 //     const std::string outputFileName2 = "E:/AIR/raw_data_20250907_130209.jpg";
-    unpackage_sar_data(inputFileName1, outputFileName1);
+    // unpackage_sar_data(inputFileName1, outputFileName1);
 //     unpackage_sar_data(inputFileName2, outputFileName2);
 }
 
 MainWindow::~MainWindow()
 {
+    // 安全地停止线程
+    m_serverThread->quit();
+    m_serverThread->wait();
+    delete m_tcpServerThreadObject;
     delete ui;
+}
+
+// 新增槽函数：显示弹窗
+void MainWindow::onReceivedImageData(quint16 image_num, qint16 pixel_x, qint16 pixel_y)
+{
+    // 在主线程中安全地创建和显示弹窗
+    QMessageBox::information(this,
+                             "收到ISAR成像请求",
+                             QString("图像编号：%1\n像素偏移x：%2\n像素偏移y：%3")
+                                 .arg(image_num)
+                                 .arg(pixel_x)
+                                 .arg(pixel_y));
+}
+
+void MainWindow::on_sendTestDataButton_clicked()
+{
+    // 获取服务器IP和端口号
+    QString ipAddress = ui->serverIpLineEdit->text();
+    quint16 port = ui->serverPortLineEdit->text().toUShort();
+
+    if (ipAddress.isEmpty() || port == 0) {
+        QMessageBox::warning(this, "警告", "请先正确设置服务器的IP地址和端口号！");
+        return;
+    }
+
+    // 确保套接字处于断开状态
+    if (m_testSocket->state() == QAbstractSocket::ConnectedState) {
+        m_testSocket->disconnectFromHost();
+        m_testSocket->waitForDisconnected();
+    }
+
+    // 连接到服务器
+    m_testSocket->connectToHost(ipAddress, port);
+    if (!m_testSocket->waitForConnected(5000)) { // 5秒超时
+        qDebug() << "连接服务器失败:" << m_testSocket->errorString();
+        return;
+    }
+
+    qDebug() << "测试客户端已连接，正在打包数据...";
+
+    // 1. 构造数据信息结构体
+    DataInfo dataInfo = {};
+    dataInfo.frame_header = qToLittleEndian(static_cast<quint16>(0x55AA));
+    dataInfo.data_length = qToLittleEndian(static_cast<quint32>(sizeof(DataInfo) - 6)); // 消息长度 = 20 - 6 = 14
+    dataInfo.message_count = qToLittleEndian(static_cast<quint16>(1));
+    dataInfo.source_address = qToLittleEndian(static_cast<quint16>(100));
+    dataInfo.destination_address = qToLittleEndian(static_cast<quint16>(200));
+    dataInfo.command_type = 0x01;
+    dataInfo.reserved = 0;
+    dataInfo.image_number = qToLittleEndian(static_cast<quint16>(12345));
+    dataInfo.pixel_offset_x = qToLittleEndian(static_cast<qint16>(50));
+    dataInfo.pixel_offset_y = qToLittleEndian(static_cast<qint16>(100));
+
+    // 2. 将 DataInfo 结构体转换为字节数组
+    QByteArray dataInfoPayload(reinterpret_cast<const char*>(&dataInfo), sizeof(DataInfo));
+
+    // 3. 计算校验和
+    quint8 checksum = calculateChecksum(dataInfoPayload);
+
+    // 4. 构造数据帧头结构体
+    DataHeader dataHeader = {};
+    dataHeader.fixed_value = qToLittleEndian(static_cast<quint16>(0x9EE9));
+    dataHeader.data_length = qToLittleEndian(static_cast<quint16>(dataInfoPayload.size()));
+    dataHeader.checksum = checksum;
+
+    // 5. 拼接完整数据包
+    QByteArray fullPacket;
+    fullPacket.append(reinterpret_cast<const char*>(&dataHeader), sizeof(DataHeader));
+    fullPacket.append(dataInfoPayload);
+
+    qDebug() << "准备发送测试数据包，总大小:" << fullPacket.size();
+    qDebug() << "  - 校验和:" << QString::number(checksum, 16);
+    qDebug() << "  - 图像编号:" << qFromLittleEndian(dataInfo.image_number);
+    qDebug() << "  - 像素偏移x:" << qFromLittleEndian(dataInfo.pixel_offset_x);
+    qDebug() << "  - 像素偏移y:" << qFromLittleEndian(dataInfo.pixel_offset_y);
+
+    // 6. 发送数据
+    m_testSocket->write(fullPacket);
+    m_testSocket->flush();
+
+    qDebug() << "测试数据已发送。";
+    m_testSocket->disconnectFromHost();
+}
+
+// 新增：合并后的槽函数，用于启动和停止服务器
+void MainWindow::on_toggleServerButton_clicked()
+{
+    if (!m_isServerRunning) {
+        // 当前为停止状态，执行启动操作
+        QString ipAddress = ui->serverIpLineEdit->text();
+        quint16 port = ui->serverPortLineEdit->text().toUShort();
+
+        if (ipAddress.isEmpty() || port == 0) {
+            QMessageBox::warning(this, "警告", "IP地址或端口号无效，请检查输入！");
+            return;
+        }
+
+        ui->toggleServerButton->setEnabled(false); // 启动过程中禁用按钮
+        // ui->textEdit_Log->append("尝试启动TCP服务器...");
+
+        QMetaObject::invokeMethod(m_tcpServerThreadObject, "startServer", Qt::QueuedConnection, Q_ARG(QString, ipAddress), Q_ARG(quint16, port));
+
+    } else {
+        // 当前为运行状态，执行停止操作
+        ui->toggleServerButton->setEnabled(false); // 停止过程中禁用按钮
+        // ui->textEdit_Log->append("尝试停止TCP服务器...");
+
+        QMetaObject::invokeMethod(m_tcpServerThreadObject, "stopServer", Qt::QueuedConnection);
+    }
+}
+
+// 新增：服务器成功启动时更新UI的槽
+void MainWindow::onServerStarted()
+{
+    m_isServerRunning = true;
+    ui->toggleServerButton->setText("停止服务器");
+    ui->toggleServerButton->setEnabled(true);
+    // 您也可以在这里禁用IP和端口编辑框，防止运行时修改
+    ui->serverIpLineEdit->setEnabled(false);
+    ui->serverPortLineEdit->setEnabled(false);
+}
+
+// 新增：服务器成功停止时更新UI的槽
+void MainWindow::onServerStopped()
+{
+    m_isServerRunning = false;
+    ui->toggleServerButton->setText("启动服务器");
+    ui->toggleServerButton->setEnabled(true);
+    // 重新启用IP和端口编辑框
+    ui->serverIpLineEdit->setEnabled(true);
+    ui->serverPortLineEdit->setEnabled(true);
 }
 
 // 槽函数：选择TIF文件

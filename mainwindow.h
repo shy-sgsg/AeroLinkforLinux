@@ -9,6 +9,7 @@
 #include <QPushButton>
 #include <QCheckBox>
 #include <QLineEdit>
+#include "tcp_server_thread.h"
 #include "file_monitor.h"
 #include "message_transfer.h"
 #include "image_transfer.h"
@@ -42,6 +43,11 @@ private slots:
     void on_manualSendButton_clicked();
     void on_sarCheckBox_stateChanged(int state);
     void on_isarCheckBox_stateChanged(int state);
+    void on_toggleServerButton_clicked(); // 新增：合并后的槽函数
+    void onServerStarted(); // 新增：服务器成功启动时更新UI的槽
+    void onServerStopped(); // 新增：服务器成功停止时更新UI的槽
+    void on_sendTestDataButton_clicked();
+    void onReceivedImageData(quint16 image_num, qint16 pixel_x, qint16 pixel_y);
 
 private:
     Ui::MainWindow *ui;
@@ -65,6 +71,12 @@ private:
     QPushButton* selectAuxButton;
     QPushButton* manualSendButton;
     QButtonGroup* imageTypeButtonGroup;
+
+    TcpServerThread* m_tcpServerThreadObject;
+    QThread* m_serverThread;
+    bool m_isServerRunning = false; // 新增：服务器运行状态标记
+
+    QTcpSocket* m_testSocket;
 
 };
 #endif // MAINWINDOW_H
