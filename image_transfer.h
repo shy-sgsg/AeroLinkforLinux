@@ -34,6 +34,8 @@ struct ImageTransferResult {
 // 单文件处理（TIF转JPG、AUX打包、TCP发送）
 ImageTransferResult processAndTransferImage(const QString &filePath, const QString &ipAddress, quint16 port, uint16_t image_num);
 
+ImageTransferResult processAndTransferManualImage(const QString &tifFilePath, const QString &auxFilePath, const QString &ipAddress, quint16 port, uint16_t image_num);
+
 
 // ===================== 高级批量传输类 =====================
 // 支持信号/槽的批量传输工具

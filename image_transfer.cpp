@@ -122,6 +122,91 @@ ImageTransferResult processAndTransferImage(const QString &filePath, const QStri
     return result;
 }
 
+ImageTransferResult processAndTransferManualImage(const QString &tifFilePath, const QString &auxFilePath, const QString &ipAddress, quint16 port, uint16_t image_num)
+{
+    ImageTransferResult result;
+    result.success = false;
+
+    // 1. 验证文件路径
+    if (tifFilePath.isEmpty()) {
+        result.message = "TIF file path is empty.";
+        qWarning() << result.message;
+        return result;
+    }
+    QFileInfo tifFileInfo(tifFilePath);
+    if (!tifFileInfo.exists() || !tifFileInfo.isFile()) {
+        result.message = QString("TIF file not found: %1").arg(tifFilePath);
+        qWarning() << result.message;
+        return result;
+    }
+    // 等待TIF文件释放
+    if (!waitForFileRelease(tifFilePath)) {
+        result.message = QString("TIF file %1 is locked for too long, give up processing.").arg(tifFilePath);
+        qWarning() << result.message;
+        return result;
+    }
+
+    // 2. 离线打包阶段：根据AUX文件路径是否为空，决定是否打包
+    QString binPath = tifFilePath;
+    binPath.replace(".tif", ".bin", Qt::CaseInsensitive);
+
+    qDebug() << "Starting offline packing...";
+
+    if (!auxFilePath.isEmpty()) {
+        // SAR图像处理：TIF和AUX文件都存在
+        QFileInfo auxFileInfo(auxFilePath);
+        if (!auxFileInfo.exists() || !auxFileInfo.isFile()) {
+            result.message = QString("AUX file not found: %1").arg(auxFilePath);
+            qWarning() << result.message;
+            return result;
+        }
+        // 等待AUX文件释放
+        if (!waitForFileRelease(auxFilePath)) {
+            result.message = QString("AUX file %1 is locked for too long, give up processing.").arg(auxFilePath);
+            qWarning() << result.message;
+            return result;
+        }
+
+        qDebug() << "Packing TIF and AUX files into a single BIN file...";
+        if (!createBinFileFromTifAndAux(tifFilePath, auxFilePath, binPath, image_num)) {
+            result.message = "Failed to create bin file from TIF and AUX.";
+            return result;
+        }
+    } else {
+        // ISAR图像处理：只有TIF文件，AUX路径为空
+        qDebug() << "Packing TIF file only into a single BIN file...";
+        // 假设createBinFileFromTifAndAux函数能够处理空的auxFilePath参数
+        if (!createBinFileFromTifOnly(tifFilePath, binPath, image_num)) {
+            result.message = "Failed to create bin file from TIF only.";
+            return result;
+        }
+    }
+
+    qDebug() << "Offline packing completed successfully.";
+
+    // 3. 在线传输阶段（与原函数逻辑完全相同）
+    SarPacketTransferManager transferManager;
+    QEventLoop loop;
+    bool transferSuccess = false;
+    QString transferMessage;
+
+    QObject::connect(&transferManager, &SarPacketTransferManager::finished,
+                     [&](bool success) {
+                         transferSuccess = success;
+                         transferMessage = success ? "Transfer completed successfully." : "Transfer failed due to an error.";
+                         loop.quit();
+                     });
+
+    qDebug() << "Starting online transfer...";
+    transferManager.startTransfer(binPath, ipAddress, port);
+    loop.exec();
+
+    result.success = transferSuccess;
+    result.message = transferMessage;
+
+    return result;
+}
+
 /**
  * @brief SarPacketTransferManager的构造函数
  * @param packetizer 负责提供数据包的打包器实例

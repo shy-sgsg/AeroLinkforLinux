@@ -117,7 +117,7 @@ private:
  * @return 成功返回true，失败返回false
  */
 bool createBinFileFromTifAndAux(const QString& tifFilePath, const QString& auxFilePath, const QString& outputBinFilePath, uint16_t image_num);
-
+bool createBinFileFromTifOnly(const QString& tifFilePath, const QString& outputBinFilePath, uint16_t image_num);
 // 解包 SAR 数据文件
 bool unpackage_sar_data(const std::string& input_filename, const std::string& output_image_filename);
 

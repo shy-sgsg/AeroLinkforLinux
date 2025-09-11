@@ -3,7 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
-#include <cstring> // For memcpy
+#include <cstring>
 #include <QDebug>
 #include <QImage>
 #include <QDir>
@@ -141,7 +141,7 @@ bool createBinFileFromTifAndAux(const QString& tifFilePath, const QString& auxFi
         return false;
     }
 
-    const int newMemoryLimitMB = 2048;
+    const int newMemoryLimitMB = 256;
     qDebug() << "Setting QImageReader allocation limit to" << newMemoryLimitMB << "MB.";
     reader.setAllocationLimit(newMemoryLimitMB);
 
@@ -205,6 +205,97 @@ bool createBinFileFromTifAndAux(const QString& tifFilePath, const QString& auxFi
 
     binFile.close();
     qDebug() << "Successfully created bin file at:" << outputBinFilePath;
+    return true;
+}
+
+bool createBinFileFromTifOnly(const QString& tifFilePath, const QString& outputBinFilePath, uint16_t image_num)
+{
+    // 1. 使用QImageReader来安全地读取TIF文件并转换为JPG数据
+    QImageReader reader(tifFilePath);
+    if (!reader.canRead()) {
+        qWarning() << "QImageReader cannot read file:" << tifFilePath;
+        return false;
+    }
+
+    const int newMemoryLimitMB = 256;
+    qDebug() << "Setting QImageReader allocation limit to" << newMemoryLimitMB << "MB.";
+    reader.setAllocationLimit(newMemoryLimitMB);
+
+    QImage tifImage = reader.read();
+    if (tifImage.isNull()) {
+        qWarning() << "Failed to load TIF image into QImage. Potential reasons: file corrupted or still too large.";
+        qWarning() << "Reader error:" << reader.errorString();
+        return false;
+    }
+
+    // 将读取的QImage数据保存为JPG格式到QByteArray
+    QByteArray jpgData;
+    QBuffer buffer(&jpgData);
+    buffer.open(QIODevice::WriteOnly);
+
+    QImageWriter writer(&buffer, "JPG");
+    writer.setQuality(80); // 设置JPG质量
+    if (!writer.write(tifImage)) {
+        qWarning() << "Failed to save QImage to JPG buffer.";
+        return false;
+    }
+
+    // 2. 准备 SAR_DataInfo，将所有AUX相关参数设置为0
+    SAR_DataInfo dataInfo;
+    memset(&dataInfo, 0, sizeof(SAR_DataInfo)); // 将所有字段初始化为0
+
+    // 帧头 (0d): 固定值 0x55AA
+    dataInfo.frame_header = 0x55AA;
+    dataInfo.data_length = sizeof(SAR_DataInfo) + jpgData.size();
+    dataInfo.message_count = image_num;
+
+    // 图像可用标志 (22d): 协议指定可用为 FFFFH
+    dataInfo.image_available_flag = 0xFFFF;
+
+    // 计算并填充校验和
+    // 校验和从第三字节开始（消息地址字）到校验和字段前一位
+    // 即从地址 2d 到 168d，对应字节索引 2 到 168
+    uint8_t* ptr = reinterpret_cast<uint8_t*>(&dataInfo);
+    dataInfo.checksum = calculate_checksum(ptr + sizeof(uint16_t), sizeof(SAR_DataInfo) - sizeof(uint16_t) - sizeof(uint8_t));
+
+    // 3. 将 SAR_DataInfo 和 JPG 数据组合成完整数据包
+    QByteArray fullMessage;
+    fullMessage.append(reinterpret_cast<const char*>(&dataInfo), sizeof(SAR_DataInfo));
+    fullMessage.append(jpgData);
+
+    // 4. 将完整数据包拆分为帧并写入bin文件
+    QFile binFile(outputBinFilePath);
+    if (!binFile.open(QIODevice::WriteOnly)) {
+        qWarning() << "Failed to open bin file for writing:" << outputBinFilePath;
+        return false;
+    }
+
+    qint64 totalPackets = (fullMessage.size() + 4096 - 1) / 4096;
+    qint64 currentOffset = 0;
+
+    for (int i = 0; i < totalPackets; ++i) {
+        SAR_Frame header;
+        memset(&header, 0, sizeof(SAR_Frame));
+
+        qint64 payloadSize = qMin(static_cast<qint64>(4096), fullMessage.size() - currentOffset);
+        QByteArray payload = fullMessage.mid(currentOffset, payloadSize);
+
+        header.fixed_value = 0x90E9;
+        header.image_number = image_num;
+        header.image_size = jpgData.size();
+        header.current_packet = i + 1;
+        header.total_packets = totalPackets;
+        header.data_length = payloadSize;
+        header.checksum = calculate_checksum(reinterpret_cast<const uint8_t*>(payload.constData()), payload.size());
+
+        binFile.write(reinterpret_cast<const char*>(&header), sizeof(SAR_Frame));
+        binFile.write(payload);
+
+        currentOffset += payloadSize;
+    }
+
+    binFile.close();
+    qDebug() << "Successfully created bin file from TIF only at:" << outputBinFilePath;
     return true;
 }
 

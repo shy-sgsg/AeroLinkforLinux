@@ -6,6 +6,9 @@
 #include <QMap>
 #include <QSet>
 #include <QMutex>
+#include <QPushButton>
+#include <QCheckBox>
+#include <QLineEdit>
 #include "file_monitor.h"
 #include "message_transfer.h"
 #include "image_transfer.h"
@@ -34,6 +37,11 @@ private slots:
     void onLogMessage(const QString &message);
     void updateStatistics();
     void processAndTransferFile(const QString &filePath);
+    void on_selectTifButton_clicked();
+    void on_selectAuxButton_clicked();
+    void on_manualSendButton_clicked();
+    void on_sarCheckBox_stateChanged(int state);
+    void on_isarCheckBox_stateChanged(int state);
 
 private:
     Ui::MainWindow *ui;
@@ -49,7 +57,14 @@ private:
     // 消息传输类
     class MessageTransfer* m_messageTransfer;
 
-
+    QCheckBox* sarCheckBox;
+    QCheckBox* isarCheckBox;
+    QLineEdit* tifPathLineEdit;
+    QLineEdit* auxPathLineEdit;
+    QPushButton* selectTifButton;
+    QPushButton* selectAuxButton;
+    QPushButton* manualSendButton;
+    QButtonGroup* imageTypeButtonGroup;
 
 };
 #endif // MAINWINDOW_H

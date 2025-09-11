@@ -8,6 +8,7 @@
 #include <QFileInfo>
 #include <QFileDialog>
 #include <QTimer>
+#include <QButtonGroup>
 #include "logmanager.h"
 #include <QImageReader>
 #include <QThread>
@@ -34,6 +35,16 @@ MainWindow::MainWindow(QWidget *parent)
     ui->pathLineEdit->setPlaceholderText("请输入监控文件夹路径"); // ✅ 设置路径编辑框占位符
     ui->pathLineEdit->setText(mainFolderPath); // ✅ 将硬编码路径设为默认值
 
+    imageTypeButtonGroup = new QButtonGroup(this);
+    imageTypeButtonGroup->setExclusive(true); // 设置为互斥模式
+    imageTypeButtonGroup->addButton(ui->sarCheckBox);
+    imageTypeButtonGroup->addButton(ui->isarCheckBox);
+    ui->sarCheckBox->setChecked(true);
+    ui->auxPathLineEdit->setEnabled(true);
+    ui->selectAuxButton->setEnabled(true);
+    connect(ui->sarCheckBox, &QCheckBox::stateChanged, this, &MainWindow::on_sarCheckBox_stateChanged);
+    connect(ui->isarCheckBox, &QCheckBox::stateChanged, this, &MainWindow::on_isarCheckBox_stateChanged);
+
     connect(&LogManager::instance(), &LogManager::logMessage, this, &MainWindow::onLogMessage);
 
     updateStatistics();
@@ -59,6 +70,83 @@ MainWindow::MainWindow(QWidget *parent)
 MainWindow::~MainWindow()
 {
     delete ui;
+}
+
+// 槽函数：选择TIF文件
+void MainWindow::on_selectTifButton_clicked()
+{
+    QString filePath = QFileDialog::getOpenFileName(this, "选择TIF文件", "", "TIF文件 (*.tif)");
+    if (!filePath.isEmpty()) {
+        ui->tifPathLineEdit->setText(filePath);
+    }
+}
+
+// 槽函数：选择AUX文件
+void MainWindow::on_selectAuxButton_clicked()
+{
+    QString filePath = QFileDialog::getOpenFileName(this, "选择AUX文件", "", "AUX文件 (*.dat)");
+    if (!filePath.isEmpty()) {
+        ui->auxPathLineEdit->setText(filePath);
+    }
+}
+
+void MainWindow::on_manualSendButton_clicked()
+{
+    QString tifFilePath = ui->tifPathLineEdit->text();
+    QString ipAddress = ui->ipAddressLineEdit->text();
+    quint16 port = ui->portLineEdit->text().toUShort();
+    uint16_t image_num = 1; // 示例值，根据实际情况调整
+
+    if (tifFilePath.isEmpty()) {
+        QMessageBox::warning(this, "警告", "请选择一个TIF文件！");
+        return;
+    }
+
+    ImageTransferResult result;
+
+    // 根据复选框状态决定是否传递AUX文件路径
+    if (ui->isarCheckBox->isChecked()) {
+        ui->textEdit_Log->append("发送ISAR图像，仅发送TIF文件。");
+        result = processAndTransferManualImage(tifFilePath, QString(), ipAddress, port, image_num);
+    } else {
+        QString auxFilePath = ui->auxPathLineEdit->text();
+        if (auxFilePath.isEmpty()) {
+            QMessageBox::warning(this, "警告", "请选择一个AUX文件！");
+            return;
+        }
+        ui->textEdit_Log->append("发送SAR图像，打包TIF和AUX文件。");
+        result = processAndTransferManualImage(tifFilePath, auxFilePath, ipAddress, port, image_num);
+    }
+
+    // 处理传输结果并更新日志
+    if (result.success) {
+        ui->textEdit_Log->append("手动数传成功：" + result.message);
+    } else {
+        ui->textEdit_Log->append("手动数传失败：" + result.message);
+    }
+}
+
+// 槽函数：SAR复选框状态改变
+void MainWindow::on_sarCheckBox_stateChanged(int state)
+{
+    // 检查SAR复选框是否被选中
+    if (state == Qt::Checked) {
+        // 如果选中，则启用AUX文件相关控件
+        ui->auxPathLineEdit->setEnabled(true);
+        ui->selectAuxButton->setEnabled(true);
+    }
+}
+
+// 槽函数：ISAR复选框状态改变
+void MainWindow::on_isarCheckBox_stateChanged(int state)
+{
+    // 检查ISAR复选框是否被选中
+    if (state == Qt::Checked) {
+        // 如果选中，则禁用AUX文件相关控件并清空路径
+        ui->auxPathLineEdit->setEnabled(false);
+        ui->selectAuxButton->setEnabled(false);
+        ui->auxPathLineEdit->clear();
+    }
 }
 
 // 发送消息按钮的槽函数，使用MessageTransfer
