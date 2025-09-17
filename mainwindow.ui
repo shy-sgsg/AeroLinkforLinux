@@ -77,16 +77,22 @@
       </property>
       <item>
        <widget class="QLabel" name="label">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
         <property name="text">
-         <string>tif文件路径： </string>
+         <string>图像文件路径：   </string>
         </property>
        </widget>
       </item>
       <item>
-       <widget class="QLineEdit" name="tifPathLineEdit"/>
+       <widget class="QLineEdit" name="imagePathLineEdit"/>
       </item>
       <item>
-       <widget class="QPushButton" name="selectTifButton">
+       <widget class="QPushButton" name="selectImageButton">
         <property name="text">
          <string>浏览</string>
         </property>
@@ -104,8 +110,14 @@
       </property>
       <item>
        <widget class="QLabel" name="label_3">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
         <property name="text">
-         <string>aux文件路径： </string>
+         <string>aux文件路径：    </string>
         </property>
        </widget>
       </item>
@@ -143,7 +155,7 @@
         <widget class="QCheckBox" name="sarCheckBox">
          <property name="geometry">
           <rect>
-           <x>80</x>
+           <x>100</x>
            <y>0</y>
            <width>91</width>
            <height>23</height>
@@ -170,6 +182,19 @@
          </property>
          <property name="text">
           <string>ISAR图像</string>
+         </property>
+        </widget>
+        <widget class="QCheckBox" name="GMTICheckBox">
+         <property name="geometry">
+          <rect>
+           <x>30</x>
+           <y>0</y>
+           <width>98</width>
+           <height>23</height>
+          </rect>
+         </property>
+         <property name="text">
+          <string>GMTI</string>
          </property>
         </widget>
        </widget>
@@ -291,16 +316,9 @@
        <number>0</number>
       </property>
       <item>
-       <widget class="QPushButton" name="pushButton">
+       <widget class="QPushButton" name="toggleMonitorButton">
         <property name="text">
          <string>开始监控</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QPushButton" name="stopButton">
-        <property name="text">
-         <string>停止监控</string>
         </property>
        </widget>
       </item>
@@ -381,6 +399,26 @@
         </property>
         <property name="text">
          <string>发送</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="horizontalLayout_9">
+      <property name="leftMargin">
+       <number>0</number>
+      </property>
+      <property name="topMargin">
+       <number>0</number>
+      </property>
+      <item>
+       <widget class="QLineEdit" name="imageNumLineEdit"/>
+      </item>
+      <item>
+       <widget class="QPushButton" name="queryImageButton">
+        <property name="text">
+         <string>查询</string>
         </property>
        </widget>
       </item>

@@ -31,6 +31,7 @@ struct DataInfo {
     quint16 image_number;      // 图像编号 (2 bytes)
     qint16  pixel_offset_x;    // 像素偏移x (2 bytes)
     qint16  pixel_offset_y;    // 像素偏移y (2 bytes)
+    qint16  total_y;           // 图像总列数 (2 bytes)
 };
 
 // 恢复默认的内存对齐方式

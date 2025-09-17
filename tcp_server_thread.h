@@ -21,7 +21,7 @@ signals:
     void logMessage(const QString& message);
     void serverStarted();
     void serverStopped();
-    void receivedImageData(quint16 image_num, qint16 pixel_x, qint16 pixel_y);
+    void receivedIsarRequest(quint16 image_num, quint16 pixel_x, quint16 pixel_y);
 
 private slots:
     void onNewConnection();

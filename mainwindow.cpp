@@ -9,6 +9,7 @@
 #include <QButtonGroup>
 #include <QImageReader>
 #include <QThread>
+#include <QXmlStreamWriter>
 #include "logmanager.h"
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
@@ -25,9 +26,11 @@ quint16 port = 65432;
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
+    , m_imageCounter(0)
+    , m_isarRequestCounter(0)
 {
     fileMonitor = new FileMonitor(this);
-    connect(fileMonitor, &FileMonitor::newTifFileDetected, this, &MainWindow::processAndTransferFile);
+    connect(fileMonitor, &FileMonitor::newFileDetected, this, &MainWindow::processAndTransferFile);
     // 可选：连接 mainDirChanged、subDirChanged 信号做UI更新
     ui->setupUi(this);
     ui->ipAddressLineEdit->setPlaceholderText("请输入 IP 地址");
@@ -39,11 +42,13 @@ MainWindow::MainWindow(QWidget *parent)
     imageTypeButtonGroup->setExclusive(true); // 设置为互斥模式
     imageTypeButtonGroup->addButton(ui->sarCheckBox);
     imageTypeButtonGroup->addButton(ui->isarCheckBox);
+    imageTypeButtonGroup->addButton(ui->GMTICheckBox);
     ui->sarCheckBox->setChecked(true);
     ui->auxPathLineEdit->setEnabled(true);
     ui->selectAuxButton->setEnabled(true);
-    connect(ui->sarCheckBox, &QCheckBox::stateChanged, this, &MainWindow::on_sarCheckBox_stateChanged);
-    connect(ui->isarCheckBox, &QCheckBox::stateChanged, this, &MainWindow::on_isarCheckBox_stateChanged);
+    connect(ui->sarCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::on_sarCheckBox_stateChanged);
+    connect(ui->isarCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::on_isarCheckBox_stateChanged);
+    connect(ui->GMTICheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::on_GMTICheckBox_stateChanged);
 
     connect(&LogManager::instance(), &LogManager::logMessage, this, &MainWindow::onLogMessage);
 
@@ -65,7 +70,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_tcpServerThreadObject, &TcpServerThread::serverStarted, this, &MainWindow::onServerStarted);
     connect(m_tcpServerThreadObject, &TcpServerThread::serverStopped, this, &MainWindow::onServerStopped);
     connect(m_tcpServerThreadObject, &TcpServerThread::logMessage, this, &MainWindow::onLogMessage);
-    connect(m_tcpServerThreadObject, &TcpServerThread::receivedImageData, this, &MainWindow::onReceivedImageData);
+    connect(m_tcpServerThreadObject, &TcpServerThread::receivedIsarRequest, this, &MainWindow::onReceivedIsarRequest);
 
     // 启动线程
     m_serverThread->start();
@@ -75,13 +80,6 @@ MainWindow::MainWindow(QWidget *parent)
     ui->toggleServerButton->setEnabled(true);
 
     m_testSocket = new QTcpSocket(this);
-
-    // const std::string inputFileName1 = "E:/AIR/raw_data_20250908_214537.bin";
-    // const std::string outputFileName1 = "E:/AIR/raw_data_20250908_214537.jpg";
-//     const std::string inputFileName2 = "E:/AIR/raw_data_20250907_130209.bin";
-//     const std::string outputFileName2 = "E:/AIR/raw_data_20250907_130209.jpg";
-    // unpackage_sar_data(inputFileName1, outputFileName1);
-//     unpackage_sar_data(inputFileName2, outputFileName2);
 }
 
 MainWindow::~MainWindow()
@@ -93,16 +91,65 @@ MainWindow::~MainWindow()
     delete ui;
 }
 
-// 新增槽函数：显示弹窗
-void MainWindow::onReceivedImageData(quint16 image_num, qint16 pixel_x, qint16 pixel_y)
+void MainWindow::onReceivedIsarRequest(quint16 imageNumber, quint16 offsetX, quint16 offsetY)
 {
-    // 在主线程中安全地创建和显示弹窗
+    // 1. 递增请求计数器，并使用它的新值
+    m_isarRequestCounter++;
+    quint16 requestId = m_isarRequestCounter;
+
+    // 2. 在主线程中安全地创建和显示弹窗
     QMessageBox::information(this,
                              "收到ISAR成像请求",
-                             QString("图像编号：%1\n像素偏移x：%2\n像素偏移y：%3")
-                                 .arg(image_num)
-                                 .arg(pixel_x)
-                                 .arg(pixel_y));
+                             QString("请求编号：%1\n图像编号：%2\n像素偏移x：%3\n像素偏移y：%4")
+                                 .arg(requestId)
+                                 .arg(imageNumber)
+                                 .arg(offsetX)
+                                 .arg(offsetY));
+
+    // 3. 获取TIF文件路径
+    QString tifPath = getImagePath(imageNumber);
+    if (tifPath.isEmpty()) {
+        qWarning() << "未找到图像编号 " << imageNumber << " 对应的文件路径。无法生成XML文件。";
+        return;
+    }
+
+    // 4. 构造SLC和AUX文件路径
+    QFileInfo tifInfo(tifPath);
+    QString baseName = tifInfo.completeBaseName();
+    QString directory = tifInfo.absolutePath();
+
+    QString slcPath = QDir(directory).filePath("SLC_" + baseName.replace("IMG_", "") + ".slc");
+    QString auxPath = QDir(directory).filePath("AUX_" + baseName.replace("IMG_", "") + ".dat");
+
+    // 5. 构造XML文件名，现在包含请求编号
+    QString xmlPath = QDir(directory).filePath(QString("ISARConfig_IMG_%1_REQ_%2.xml").arg(imageNumber).arg(requestId));
+
+    // 6. 使用 QXmlStreamWriter 写入XML文件
+    QFile file(xmlPath);
+    if (!file.open(QIODevice::WriteOnly)) {
+        qWarning() << "无法打开文件 " << xmlPath << " 进行写入。错误：" << file.errorString();
+        return;
+    }
+
+    QXmlStreamWriter xmlWriter(&file);
+    xmlWriter.setAutoFormatting(true);
+    xmlWriter.writeStartDocument();
+    xmlWriter.writeStartElement("ISARConfig");
+
+    xmlWriter.writeTextElement("file_slc", slcPath);
+    xmlWriter.writeTextElement("file_aux", auxPath);
+    xmlWriter.writeTextElement("rg_center", QString::number(offsetX));
+    xmlWriter.writeTextElement("az_center", QString::number(offsetY));
+    xmlWriter.writeTextElement("rg_win_len", "1024");
+    xmlWriter.writeTextElement("az_win_len", "4096");
+    xmlWriter.writeTextElement("request_id", QString::number(requestId)); // 将请求编号写入XML
+
+    xmlWriter.writeEndElement(); // </ISARConfig>
+    xmlWriter.writeEndDocument();
+
+    file.close();
+
+    qDebug() << "XML配置文件已成功生成：" << xmlPath;
 }
 
 void MainWindow::on_sendTestDataButton_clicked()
@@ -134,15 +181,16 @@ void MainWindow::on_sendTestDataButton_clicked()
     // 1. 构造数据信息结构体
     DataInfo dataInfo = {};
     dataInfo.frame_header = qToLittleEndian(static_cast<quint16>(0x55AA));
-    dataInfo.data_length = qToLittleEndian(static_cast<quint32>(sizeof(DataInfo) - 6)); // 消息长度 = 20 - 6 = 14
+    dataInfo.data_length = qToLittleEndian(static_cast<quint32>(sizeof(DataInfo) + sizeof(DataHeader)));
     dataInfo.message_count = qToLittleEndian(static_cast<quint16>(1));
     dataInfo.source_address = qToLittleEndian(static_cast<quint16>(100));
     dataInfo.destination_address = qToLittleEndian(static_cast<quint16>(200));
     dataInfo.command_type = 0x01;
     dataInfo.reserved = 0;
-    dataInfo.image_number = qToLittleEndian(static_cast<quint16>(12345));
+    dataInfo.image_number = qToLittleEndian(static_cast<quint16>(3));
     dataInfo.pixel_offset_x = qToLittleEndian(static_cast<qint16>(50));
     dataInfo.pixel_offset_y = qToLittleEndian(static_cast<qint16>(100));
+    dataInfo.total_y = qToLittleEndian(static_cast<qint16>(4096));
 
     // 2. 将 DataInfo 结构体转换为字节数组
     QByteArray dataInfoPayload(reinterpret_cast<const char*>(&dataInfo), sizeof(DataInfo));
@@ -166,6 +214,7 @@ void MainWindow::on_sendTestDataButton_clicked()
     qDebug() << "  - 图像编号:" << qFromLittleEndian(dataInfo.image_number);
     qDebug() << "  - 像素偏移x:" << qFromLittleEndian(dataInfo.pixel_offset_x);
     qDebug() << "  - 像素偏移y:" << qFromLittleEndian(dataInfo.pixel_offset_y);
+    qDebug() << "  - 图像总列数:" << qFromLittleEndian(dataInfo.total_y);
 
     // 6. 发送数据
     m_testSocket->write(fullPacket);
@@ -182,22 +231,16 @@ void MainWindow::on_toggleServerButton_clicked()
         // 当前为停止状态，执行启动操作
         QString ipAddress = ui->serverIpLineEdit->text();
         quint16 port = ui->serverPortLineEdit->text().toUShort();
-
         if (ipAddress.isEmpty() || port == 0) {
             QMessageBox::warning(this, "警告", "IP地址或端口号无效，请检查输入！");
             return;
         }
-
         ui->toggleServerButton->setEnabled(false); // 启动过程中禁用按钮
-        // ui->textEdit_Log->append("尝试启动TCP服务器...");
-
         QMetaObject::invokeMethod(m_tcpServerThreadObject, "startServer", Qt::QueuedConnection, Q_ARG(QString, ipAddress), Q_ARG(quint16, port));
 
     } else {
         // 当前为运行状态，执行停止操作
         ui->toggleServerButton->setEnabled(false); // 停止过程中禁用按钮
-        // ui->textEdit_Log->append("尝试停止TCP服务器...");
-
         QMetaObject::invokeMethod(m_tcpServerThreadObject, "stopServer", Qt::QueuedConnection);
     }
 }
@@ -225,11 +268,11 @@ void MainWindow::onServerStopped()
 }
 
 // 槽函数：选择TIF文件
-void MainWindow::on_selectTifButton_clicked()
+void MainWindow::on_selectImageButton_clicked()
 {
-    QString filePath = QFileDialog::getOpenFileName(this, "选择TIF文件", "", "TIF文件 (*.tif)");
+    QString filePath = QFileDialog::getOpenFileName(this, "选择图像文件", "", "图像文件 (*.tif *.jpg *.png)");
     if (!filePath.isEmpty()) {
-        ui->tifPathLineEdit->setText(filePath);
+        ui->imagePathLineEdit->setText(filePath);
     }
 }
 
@@ -244,42 +287,53 @@ void MainWindow::on_selectAuxButton_clicked()
 
 void MainWindow::on_manualSendButton_clicked()
 {
-    QString tifFilePath = ui->tifPathLineEdit->text();
     QString ipAddress = ui->ipAddressLineEdit->text();
     quint16 port = ui->portLineEdit->text().toUShort();
-    uint16_t image_num = 1; // 示例值，根据实际情况调整
 
-    if (tifFilePath.isEmpty()) {
-        QMessageBox::warning(this, "警告", "请选择一个TIF文件！");
-        return;
-    }
+    uint16_t currentImageNum = m_imageCounter;
+    m_imageCounter++;
 
     ImageTransferResult result;
 
-    // 根据复选框状态决定是否传递AUX文件路径
-    if (ui->isarCheckBox->isChecked()) {
-        ui->textEdit_Log->append("发送ISAR图像，仅发送TIF文件。");
-        result = processAndTransferManualImage(tifFilePath, QString(), ipAddress, port, image_num);
-    } else {
-        QString auxFilePath = ui->auxPathLineEdit->text();
-        if (auxFilePath.isEmpty()) {
-            QMessageBox::warning(this, "警告", "请选择一个AUX文件！");
-            return;
+    QString imageFilePath = ui->imagePathLineEdit->text();
+    if (imageFilePath.isEmpty()) {
+        QMessageBox::warning(this, "警告", "请选择一个图像文件！");
+        return;
+    }
+
+    if (ui->GMTICheckBox->isChecked()) {
+        qDebug() << "发送GMTI图像以及目标信息包。";
+        result = processAndTransferGMTI(imageFilePath, ipAddress, port, currentImageNum);
+    }
+    else {
+        // 根据复选框状态决定是否传递AUX文件路径
+        if (ui->isarCheckBox->isChecked()) {
+            qDebug() << "发送ISAR图像，仅发送TIF文件。";
+            result = processAndTransferManualImage(imageFilePath, QString(), ipAddress, port, currentImageNum);
+        } else {
+            QString auxFilePath = ui->auxPathLineEdit->text();
+            if (auxFilePath.isEmpty()) {
+                QMessageBox::warning(this, "警告", "请选择一个AUX文件！");
+                return;
+            }
+            qDebug() << "发送SAR图像，打包TIF和AUX文件。";
+            result = processAndTransferManualImage(imageFilePath, auxFilePath, ipAddress, port, currentImageNum);
         }
-        ui->textEdit_Log->append("发送SAR图像，打包TIF和AUX文件。");
-        result = processAndTransferManualImage(tifFilePath, auxFilePath, ipAddress, port, image_num);
     }
 
     // 处理传输结果并更新日志
     if (result.success) {
-        ui->textEdit_Log->append("手动数传成功：" + result.message);
+        m_fileStatusMutex.lock();
+        m_imageLog[currentImageNum] = imageFilePath;
+        m_fileStatusMutex.unlock();
+        qDebug() << QString("手动数传成功。图片编号: %1, 文件路径: %2").arg(currentImageNum).arg(imageFilePath);
     } else {
-        ui->textEdit_Log->append("手动数传失败：" + result.message);
+        qDebug() << ("手动数传失败：" + result.message);
     }
 }
 
 // 槽函数：SAR复选框状态改变
-void MainWindow::on_sarCheckBox_stateChanged(int state)
+void MainWindow::on_sarCheckBox_stateChanged(Qt::CheckState state)
 {
     // 检查SAR复选框是否被选中
     if (state == Qt::Checked) {
@@ -290,11 +344,20 @@ void MainWindow::on_sarCheckBox_stateChanged(int state)
 }
 
 // 槽函数：ISAR复选框状态改变
-void MainWindow::on_isarCheckBox_stateChanged(int state)
+void MainWindow::on_isarCheckBox_stateChanged(Qt::CheckState state)
 {
     // 检查ISAR复选框是否被选中
     if (state == Qt::Checked) {
         // 如果选中，则禁用AUX文件相关控件并清空路径
+        ui->auxPathLineEdit->setEnabled(false);
+        ui->selectAuxButton->setEnabled(false);
+        ui->auxPathLineEdit->clear();
+    }
+}
+
+void MainWindow::on_GMTICheckBox_stateChanged(Qt::CheckState state)
+{
+    if (state == Qt::Checked) {
         ui->auxPathLineEdit->setEnabled(false);
         ui->selectAuxButton->setEnabled(false);
         ui->auxPathLineEdit->clear();
@@ -311,33 +374,38 @@ void MainWindow::on_sendMessageButton_clicked()
     }
 }
 
-// “开始监控”按钮的槽函数
-void MainWindow::on_pushButton_clicked()
+void MainWindow::on_toggleMonitorButton_clicked()
 {
-    ipAddress = ui->ipAddressLineEdit->text();
-    port = ui->portLineEdit->text().toUShort();
+    if (!m_isMonitoring) {
+        // 当前为停止状态，执行启动操作
+        ipAddress = ui->ipAddressLineEdit->text();
+        port = ui->portLineEdit->text().toUShort();
 
-    if (ipAddress.isEmpty() || port == 0) {
-        qDebug() << "请正确填写IP地址与端口号！";
-        QMessageBox::warning(this, "警告", "请正确填写IP地址与端口号！");
-        return;
+        if (ipAddress.isEmpty() || port == 0) {
+            QMessageBox::warning(this, "警告", "请正确填写IP地址与端口号！");
+            return;
+        }
+
+        mainFolderPath = ui->pathLineEdit->text();
+        if (!QDir(mainFolderPath).exists()) {
+            QMessageBox::warning(this, "警告", "指定的监控文件夹不存在。");
+            return;
+        }
+
+        bool isGMTI = ui->GMTICheckBox->isChecked();
+        fileMonitor->setMainFolder(mainFolderPath);
+        fileMonitor->start(isGMTI); // ✅ 调用新的 start 函数
+
+        m_isMonitoring = true;
+        ui->toggleMonitorButton->setText("停止监控");
+        qDebug() << "开始监控文件夹：" << mainFolderPath;
+    } else {
+        // 当前为运行状态，执行停止操作
+        fileMonitor->stop();
+        m_isMonitoring = false;
+        ui->toggleMonitorButton->setText("开始监控");
+        qDebug() << "停止监控。";
     }
-
-    mainFolderPath = ui->pathLineEdit->text();
-    if (!QDir(mainFolderPath).exists()) {
-        qDebug() << "错误：指定的监控路径不存在：" << mainFolderPath;
-        QMessageBox::warning(this, "警告", "指定的监控文件夹不存在。");
-        return;
-    }
-    fileMonitor->setMainFolder(mainFolderPath);
-    fileMonitor->start();
-    updateStatistics();
-}
-
-// “停止监控”按钮的槽函数
-void MainWindow::on_stopButton_clicked()
-{
-    fileMonitor->stop();
 }
 
 // 浏览按钮的槽函数
@@ -349,34 +417,46 @@ void MainWindow::on_browseButton_clicked()
     }
 }
 
-// 只做信号转发和状态更新，实际处理交给image_transfer
+// ✅ 修改后的 processAndTransferFile 槽函数
 void MainWindow::processAndTransferFile(const QString &filePath)
 {
-    // 关键修正：使用 QMutexLocker 确保线程安全
-    QMutexLocker locker(&m_mutex);
-    // 检查文件是否已经在处理中。
-    // 如果存在并且状态不是 Success 或 Failure，则认为它正在被处理，直接返回。
+    QMutexLocker locker(&m_fileStatusMutex);
     if (m_fileStatus.contains(filePath) && m_fileStatus.value(filePath) != Success && m_fileStatus.value(filePath) != Failure) {
         qDebug() << "File" << filePath << "is already being processed. Skipping duplicate signal.";
         return;
     }
-    // 将新文件状态设置为 Pending，表示任务已开始
     m_fileStatus[filePath] = Pending;
-    // 释放锁，以便其他线程可以访问。
-    // 在调用耗时函数 processAndTransferImage() 期间，我们不需要保持锁定。
+
+    uint16_t currentImageNum = m_imageCounter++;
     locker.unlock();
+
     qDebug() << "Processing new file:" << filePath;
     ipAddress = ui->ipAddressLineEdit->text();
     port = ui->portLineEdit->text().toUShort();
-    uint16_t image_num = 1;
-    auto result = processAndTransferImage(filePath, ipAddress, port, image_num);
-    // 再次锁定互斥量，以便安全地更新共享状态
+
+    ImageTransferResult result;
+
+    if (QFileInfo(filePath).suffix().toLower() == "bin") {
+        qDebug() << "Detected a .bin file. Processing in GMTI mode.";
+        result = processAndTransferGMTI(filePath, ipAddress, port, currentImageNum);
+    } else if (QFileInfo(filePath).suffix().toLower() == "tif") {
+        qDebug() << "Detected a .tif file. Processing in SAR/ISAR mode.";
+        result = processAndTransferImage(filePath, ipAddress, port, currentImageNum);
+    } else {
+        qWarning() << "Unsupported file type detected:" << filePath;
+        result.success = false;
+        result.message = "Unsupported file type";
+    }
+
     locker.relock();
-    // 根据处理结果更新文件状态
     m_fileStatus[filePath] = result.success ? Success : Failure;
-    // 释放锁
+    if (result.success) {
+        m_imageLog[currentImageNum] = filePath;
+        qDebug() << QString("自动数传成功。图片编号: %1, 文件路径: %2").arg(currentImageNum).arg(filePath);
+    } else {
+        qDebug() << ("自动数传失败：" + result.message);
+    }
     locker.unlock();
-    // 更新界面统计信息
     updateStatistics();
     qDebug() << "File" << filePath << (result.success ? "processed successfully." : "failed to process.");
 }
@@ -412,6 +492,40 @@ void MainWindow::updateStatistics()
     }
     if (ui->label_failed) {
         ui->label_failed->setText(QString("发送失败：%1").arg(failedFiles));
+    }
+}
+
+/**
+ * @brief 根据图像编号查询文件路径
+ * @param imageNum 图像的唯一编号
+ * @return 对应的文件路径，如果未找到则返回空字符串
+ */
+QString MainWindow::getImagePath(uint16_t imageNum)
+{
+    QMutexLocker locker(&m_fileStatusMutex); // 使用互斥锁确保线程安全
+    if (m_imageLog.contains(imageNum)) {
+        return m_imageLog.value(imageNum);
+    }
+    return QString(); // 如果未找到，返回一个空的 QString
+}
+
+// 槽函数：演示查询功能
+// 假设UI上有一个名为 queryImageButton 的按钮和一个名为 imageNumLineEdit 的文本框
+void MainWindow::on_queryImageButton_clicked()
+{
+    bool ok;
+    uint16_t imageNum = ui->imageNumLineEdit->text().toUInt(&ok);
+    if (!ok) {
+        qDebug() << "查询失败：请输入一个有效的图像编号。";
+        return;
+    }
+
+    QString imagePath = getImagePath(imageNum);
+
+    if (imagePath.isEmpty()) {
+        qDebug() << QString("查询失败：未找到图像编号 %1 对应的文件路径。").arg(imageNum);
+    } else {
+        qDebug() << QString("查询成功：图像编号 %1 对应的文件路径为：\n%2").arg(imageNum).arg(imagePath);
     }
 }
 

@@ -85,10 +85,30 @@ struct SAR_DataInfo {
     uint8_t checksum;           // 169d, 校验和
 };
 
+// 2.1 GMTI信息包
+struct GmtInfo {
+    uint8_t   target_count;    // 目标数目
+    uint8_t   targets[680];    // 目标信息（17字节/个，最多40个）
+    uint32_t  imu_time;        // 惯导周秒
+    uint16_t  image_number;    // 底图的图像编号
+    uint8_t   reserved[68];    // 备用
+};
+
+// 2.2 目标信息
+struct TargetInfo {
+    uint8_t   target_id;        // 目标编号
+    int32_t   lng;              // 目标经度
+    int32_t   lat;              // 目标纬度
+    int16_t   pixel_offset_x;   // 目标像素偏移x
+    int16_t   pixel_offset_y;   // 目标像素偏移y
+    int16_t   radial_velocity;  // 目标径向速度
+    int16_t   heading_direction;// 目标前进方向
+};
+
 #pragma pack()
 
 // 计算校验和的私有辅助函数
-// static uint8_t calculate_checksum(const uint8_t* data, size_t length);
+uint8_t calculate_checksum(const uint8_t* data, size_t length);
 
 // 封装 SAR_DataInfo 的核心函数
 SAR_DataInfo createSarDataInfo(const AuxHeader& auxHeader, uint32_t imageSize);
@@ -118,7 +138,6 @@ private:
  */
 bool createBinFileFromTifAndAux(const QString& tifFilePath, const QString& auxFilePath, const QString& outputBinFilePath, uint16_t image_num);
 bool createBinFileFromTifOnly(const QString& tifFilePath, const QString& outputBinFilePath, uint16_t image_num);
-// 解包 SAR 数据文件
 bool unpackage_sar_data(const std::string& input_filename, const std::string& output_image_filename);
 
 #endif // PACKAGE_SAR_DATA_H

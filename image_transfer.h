@@ -31,7 +31,8 @@ struct ImageTransferResult {
     QString message;
 };
 
-// 单文件处理（TIF转JPG、AUX打包、TCP发送）
+ImageTransferResult processAndTransferGMTI(const QString &filePath, const QString &ipAddress, quint16 port, uint16_t image_num);
+
 ImageTransferResult processAndTransferImage(const QString &filePath, const QString &ipAddress, quint16 port, uint16_t image_num);
 
 ImageTransferResult processAndTransferManualImage(const QString &tifFilePath, const QString &auxFilePath, const QString &ipAddress, quint16 port, uint16_t image_num);

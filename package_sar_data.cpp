@@ -11,8 +11,8 @@
 #include <QImageReader>
 #include <QImageWriter>
 
-// 计算校验和的私有辅助函数
-static uint8_t calculate_checksum(const uint8_t* data, size_t length) {
+// 计算校验和的辅助函数
+uint8_t calculate_checksum(const uint8_t* data, size_t length) {
     uint8_t sum = 0;
     for (size_t i = 0; i < length; ++i) {
         sum += data[i];
@@ -34,7 +34,7 @@ SAR_DataInfo createSarDataInfo(const AuxHeader& auxHeader, uint32_t imageSize, u
 
     // 消息地址字, 类型, 计数, 源/目的地址, 指令类型/计数 (6d - 17d):
     // 协议未明确说明如何获取，此处使用占位符
-    dataInfo.message_addr = 0x0001;
+    dataInfo.message_addr = 0;
     dataInfo.message_type = 0x0001;
     dataInfo.message_count = image_num;
     dataInfo.source_addr = 0;
@@ -127,52 +127,82 @@ SAR_DataInfo createSarDataInfo(const AuxHeader& auxHeader, uint32_t imageSize, u
 // =================== 新增离线打包函数 ===================
 bool createBinFileFromTifAndAux(const QString& tifFilePath, const QString& auxFilePath, const QString& outputBinFilePath, uint16_t image_num)
 {
-    // 1. 读取AUX文件
+    // 1. 读取AUX文件，获取SAR数据和bin值
     AuxFileReader auxReader;
     if (!auxReader.read(auxFilePath)) {
         qWarning() << "Failed to read AUX file:" << auxFilePath;
         return false;
     }
+    const AuxHeader& auxHeader = auxReader.getHeader();
+    double xBin = auxHeader.Xbin;
+    double rBin = auxHeader.Rbin;
 
-    // 2. 使用QImageReader来安全地读取TIF文件并转换为JPG数据
+    // 2. 加载TIF文件到QImage
     QImageReader reader(tifFilePath);
     if (!reader.canRead()) {
         qWarning() << "QImageReader cannot read file:" << tifFilePath;
         return false;
     }
 
-    const int newMemoryLimitMB = 256;
+    const int newMemoryLimitMB = 1024;
     qDebug() << "Setting QImageReader allocation limit to" << newMemoryLimitMB << "MB.";
     reader.setAllocationLimit(newMemoryLimitMB);
 
-    QImage tifImage = reader.read();
-    if (tifImage.isNull()) {
-        qWarning() << "Failed to load TIF image into QImage. Potential reasons: file corrupted or still too large.";
+    QImage originalTifImage = reader.read();
+    if (originalTifImage.isNull()) {
+        qWarning() << "Failed to load TIF image into QImage.";
         qWarning() << "Reader error:" << reader.errorString();
         return false;
     }
 
-    // 将读取的QImage数据保存为JPG格式到QByteArray
+    // --- 3. 图像校正核心逻辑（在内存中进行） ---
+    QImage correctedTifImage = originalTifImage; // 默认值，如果不需要校正则使用原始图像
+
+    // 检查是否需要校正
+    if (!qFuzzyCompare(xBin, rBin) && rBin != 0) {
+        double scaleFactor = xBin / rBin;
+        int newHeight = qRound(originalTifImage.height() * scaleFactor);
+
+        qDebug() << "Original image size:" << originalTifImage.width() << "x" << originalTifImage.height();
+        qDebug() << "Xbin:" << xBin << ", Rbin:" << rBin;
+        qDebug() << "Scaling image vertically with factor:" << scaleFactor << "to new height:" << newHeight;
+
+        correctedTifImage = originalTifImage.scaled(
+            originalTifImage.width(),
+            newHeight,
+            Qt::IgnoreAspectRatio,
+            Qt::SmoothTransformation
+            );
+    } else {
+        qDebug() << "Xbin and Rbin are equal or Rbin is zero. Skipping image correction.";
+    }
+
+    // --- 4. 将校正后的QImage数据保存为JPG格式到QByteArray ---
     QByteArray jpgData;
     QBuffer buffer(&jpgData);
     buffer.open(QIODevice::WriteOnly);
 
     QImageWriter writer(&buffer, "JPG");
     writer.setQuality(80); // 设置JPG质量
-    if (!writer.write(tifImage)) {
-        qWarning() << "Failed to save QImage to JPG buffer.";
+    if (!writer.write(correctedTifImage)) {
+        qWarning() << "Failed to save corrected QImage to JPG buffer.";
         return false;
     }
 
-    // 3. 准备SAR_DataInfo
-    SAR_DataInfo dataInfo = createSarDataInfo(auxReader.getHeader(), jpgData.size(), image_num);
+    // 5. 准备SAR_DataInfo，使用校正后的图像尺寸
+    // 注意：SAR_DataInfo中的图像行数和列数应该反映校正后的尺寸
+    AuxHeader correctedAuxHeader = auxHeader;
+    correctedAuxHeader.pulse_num = correctedTifImage.height();
+    correctedAuxHeader.pulse_len = correctedTifImage.width();
 
-    // 4. 将 SAR_DataInfo 和 JPG 数据组合成完整数据包
+    SAR_DataInfo dataInfo = createSarDataInfo(correctedAuxHeader, jpgData.size(), image_num);
+
+    // 6. 将 SAR_DataInfo 和 JPG 数据组合成完整数据包
     QByteArray fullMessage;
     fullMessage.append(reinterpret_cast<const char*>(&dataInfo), sizeof(SAR_DataInfo));
     fullMessage.append(jpgData);
 
-    // 5. 将完整数据包拆分为帧并写入bin文件
+    // 7. 将完整数据包拆分为帧并写入bin文件
     QFile binFile(outputBinFilePath);
     if (!binFile.open(QIODevice::WriteOnly)) {
         qWarning() << "Failed to open bin file for writing:" << outputBinFilePath;
@@ -190,8 +220,8 @@ bool createBinFileFromTifAndAux(const QString& tifFilePath, const QString& auxFi
         QByteArray payload = fullMessage.mid(currentOffset, payloadSize);
 
         header.fixed_value = 0x90E9;
-        header.image_number =image_num;
-        header.image_size = jpgData.size();
+        header.image_number = image_num;
+        header.image_size = jpgData.size(); // 仍然使用 JPG 数据大小
         header.current_packet = i + 1;
         header.total_packets = totalPackets;
         header.data_length = payloadSize;
@@ -217,7 +247,7 @@ bool createBinFileFromTifOnly(const QString& tifFilePath, const QString& outputB
         return false;
     }
 
-    const int newMemoryLimitMB = 256;
+    const int newMemoryLimitMB = 1024;
     qDebug() << "Setting QImageReader allocation limit to" << newMemoryLimitMB << "MB.";
     reader.setAllocationLimit(newMemoryLimitMB);
 
@@ -247,6 +277,7 @@ bool createBinFileFromTifOnly(const QString& tifFilePath, const QString& outputB
     // 帧头 (0d): 固定值 0x55AA
     dataInfo.frame_header = 0x55AA;
     dataInfo.data_length = sizeof(SAR_DataInfo) + jpgData.size();
+    dataInfo.message_type = 0x0002;
     dataInfo.message_count = image_num;
 
     // 图像可用标志 (22d): 协议指定可用为 FFFFH

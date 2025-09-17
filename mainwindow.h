@@ -31,23 +31,28 @@ private:
     FileMonitor* fileMonitor;
 
 private slots:
-    void on_pushButton_clicked();
-    void on_stopButton_clicked();
     void on_browseButton_clicked();
     void on_sendMessageButton_clicked();
     void onLogMessage(const QString &message);
-    void updateStatistics();
     void processAndTransferFile(const QString &filePath);
-    void on_selectTifButton_clicked();
+    void on_selectImageButton_clicked();
     void on_selectAuxButton_clicked();
     void on_manualSendButton_clicked();
-    void on_sarCheckBox_stateChanged(int state);
-    void on_isarCheckBox_stateChanged(int state);
+    void on_sarCheckBox_stateChanged(Qt::CheckState state);
+    void on_isarCheckBox_stateChanged(Qt::CheckState state);
+    void on_GMTICheckBox_stateChanged(Qt::CheckState state);
     void on_toggleServerButton_clicked(); // 新增：合并后的槽函数
     void onServerStarted(); // 新增：服务器成功启动时更新UI的槽
     void onServerStopped(); // 新增：服务器成功停止时更新UI的槽
     void on_sendTestDataButton_clicked();
-    void onReceivedImageData(quint16 image_num, qint16 pixel_x, qint16 pixel_y);
+    void onReceivedIsarRequest(quint16 imageNumber, quint16 offsetX, quint16 offsetY);
+    void on_queryImageButton_clicked();
+    void on_toggleMonitorButton_clicked();
+
+
+private:
+    void updateStatistics();
+    QString getImagePath(uint16_t imageNum);
 
 private:
     Ui::MainWindow *ui;
@@ -72,9 +77,16 @@ private:
     QPushButton* manualSendButton;
     QButtonGroup* imageTypeButtonGroup;
 
+    // 全局计数器和日志记录器
+    uint16_t m_imageCounter = 1;
+    QMap<uint16_t, QString> m_imageLog;
+    QMutex m_fileStatusMutex;
+    quint16 m_isarRequestCounter;
+
     TcpServerThread* m_tcpServerThreadObject;
     QThread* m_serverThread;
     bool m_isServerRunning = false; // 新增：服务器运行状态标记
+    bool m_isMonitoring = false;
 
     QTcpSocket* m_testSocket;
 

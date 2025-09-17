@@ -16,22 +16,39 @@ void FileMonitor::setMainFolder(const QString& folderPath) {
     m_mainFolderPath = folderPath;
 }
 
-void FileMonitor::start() {
-    if (!m_mainFolderPath.isEmpty()) {
-        stop(); // 停止所有监控，避免重复添加路径
+void FileMonitor::start(bool isGMTIMonitoring) { // ✅ 修改: 接收一个bool参数
+    if (m_mainFolderPath.isEmpty()) {
+        qDebug() << "Main folder path is empty. Aborting start().";
+        return;
+    }
+    stop(); // 停止所有监控，避免重复添加路径
+    m_isGMTIMonitoring = isGMTIMonitoring;
+
+    if (m_isGMTIMonitoring) {
+        // GMTI 模式：只监控主文件夹
         m_mainWatcher->addPath(m_mainFolderPath);
-        qDebug() << "Watching main folder:" << m_mainFolderPath;
+        m_processedBinFiles.clear();
+        QDir mainDir(m_mainFolderPath);
+        // QStringList binFiles = mainDir.entryList(QStringList("*.bin"), QDir::Files | QDir::NoDotAndDotDot);
+        // for (const QString& fileName : binFiles) {
+        //     QString fullPath = mainDir.filePath(fileName);
+        //     m_processedBinFiles.insert(fullPath);
+        //     qDebug() << "Found existing .bin file:" << fullPath;
+        // }
+        qDebug() << "Watching main folder for .bin files:" << m_mainFolderPath;
+    } else {
+        // SAR/ISAR 模式：监控子文件夹
+        m_mainWatcher->addPath(m_mainFolderPath);
+        qDebug() << "Watching main folder for sub-directories:" << m_mainFolderPath;
 
         QDir mainDir(m_mainFolderPath);
         QStringList subDirs = mainDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
 
         if (!subDirs.isEmpty()) {
             QString latestSubDir = mainDir.filePath(subDirs.first());
-
-            // --- 添加延迟和重试机制以等待 result/ID1 文件被创建 ---
             QString filePathToMonitor = QDir(latestSubDir).filePath("result/ID1");
             const int maxRetries = 10;
-            const int retryDelayMs = 500; // 500毫秒
+            const int retryDelayMs = 500;
             bool fileExists = false;
 
             for (int i = 0; i < maxRetries; ++i) {
@@ -40,9 +57,6 @@ void FileMonitor::start() {
                     break;
                 }
                 qDebug() << "File" << filePathToMonitor << "not found. Retrying in" << retryDelayMs << "ms... (Attempt" << i + 1 << "/" << maxRetries << ")";
-                // WARNING: QThread::msleep() is a blocking call.
-                // It will freeze the main application UI. For a responsive UI,
-                // consider using a non-blocking approach like QTimer.
                 QThread::msleep(retryDelayMs);
             }
 
@@ -50,33 +64,26 @@ void FileMonitor::start() {
                 qCritical() << "Error: File" << filePathToMonitor << "still not found after" << maxRetries << "attempts. Aborting start().";
                 return;
             }
-            // --- 延迟和重试机制结束 ---
 
-            // 修正：m_currentSubDir现在精确地指向result/ID1
             m_currentSubDir = filePathToMonitor;
             m_subWatcher->addPath(m_currentSubDir);
             qDebug() << "Watching newest sub-directory:" << m_currentSubDir;
             emit subDirChanged(m_currentSubDir);
 
-            // 扫描最新子文件夹中的所有TIF文件，并添加到已处理的集合中
-            m_processedFiles.clear(); // 清空旧的集合
-            QDir subDir(m_currentSubDir);
-            QStringList tifFiles = subDir.entryList(QStringList("*.tif"), QDir::Files | QDir::NoDotAndDotDot);
-            for (const QString& fileName : tifFiles) {
-                QString fullPath = subDir.filePath(fileName);
-                m_processedFiles.insert(fullPath); // 将所有现有文件都标记为已处理
-                qDebug() << "Found existing .tif file:" << fullPath;
-                emit newTifFileDetected(fullPath);
-            }
+            m_processedFiles.clear();
+            // QDir subDir(m_currentSubDir);
+            // QStringList tifFiles = subDir.entryList(QStringList("*.tif"), QDir::Files | QDir::NoDotAndDotDot);
+            // for (const QString& fileName : tifFiles) {
+            //     QString fullPath = subDir.filePath(fileName);
+            //     m_processedFiles.insert(fullPath);
+            //     qDebug() << "Found existing .tif file:" << fullPath;
+            // }
         } else {
             qDebug() << "No sub-directories found in main folder.";
         }
-        emit mainDirChanged(m_mainFolderPath);
-    } else {
-        qDebug() << "Main folder path is empty. Aborting start().";
     }
+    emit mainDirChanged(m_mainFolderPath);
 }
-
 
 void FileMonitor::stop() {
     if (m_mainWatcher->directories().isEmpty() && m_subWatcher->directories().isEmpty()) {
@@ -92,64 +99,69 @@ QString FileMonitor::getCurrentSubDir() const {
 }
 
 void FileMonitor::onMainDirectoryChanged(const QString& path) {
-    QDir dir(path);
-    QStringList subDirs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
+    if (m_isGMTIMonitoring) {
+        // GMTI 模式：检查主文件夹中的新 .bin 文件
+        QDir dir(path);
+        QStringList currentFiles = dir.entryList(QStringList("*.bin"), QDir::Files | QDir::NoDotAndDotDot);
 
-    if (!subDirs.isEmpty()) {
-        QString latestSubDir = dir.filePath(subDirs.first());
-
-        // --- 添加延迟和重试机制 ---
-        QString filePathToMonitor = QDir(latestSubDir).filePath("result/ID1");
-        const int maxRetries = 10;
-        const int retryDelayMs = 500; // 500毫秒
-        bool fileExists = false;
-
-        for (int i = 0; i < maxRetries; ++i) {
-            if (QFileInfo::exists(filePathToMonitor)) {
-                fileExists = true;
-                break;
+        for (const QString& fileName : currentFiles) {
+            QString fullPath = dir.filePath(fileName);
+            if (!m_processedBinFiles.contains(fullPath)) {
+                qDebug() << "New .bin file detected:" << fullPath;
+                emit newFileDetected(fullPath);
+                m_processedBinFiles.insert(fullPath);
             }
-            qDebug() << "File" << filePathToMonitor << "not found. Retrying in" << retryDelayMs << "ms... (Attempt" << i + 1 << "/" << maxRetries << ")";
-            QThread::msleep(retryDelayMs);
         }
+    } else {
+        // SAR/ISAR 模式：检查是否有新子文件夹
+        QDir dir(path);
+        QStringList subDirs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
 
-        if (!fileExists) {
-            qCritical() << "Error: File" << filePathToMonitor << "still not found after" << maxRetries << "attempts. Aborting.";
-            return;
-        }
-        // --- 延迟和重试机制结束 ---
+        if (!subDirs.isEmpty()) {
+            QString latestSubDir = dir.filePath(subDirs.first());
+            QString filePathToMonitor = QDir(latestSubDir).filePath("result/ID1");
+            const int maxRetries = 10;
+            const int retryDelayMs = 500;
+            bool fileExists = false;
 
-        // 确保新找到的文件夹存在且不是当前监控的文件夹
-        // 修正：现在我们检查的是精确的result/ID1路径，而不是根子文件夹
-        if (m_currentSubDir != filePathToMonitor) {
-            qDebug() << "Detected new newest sub-directory:" << filePathToMonitor;
-            // 移除旧的监控
-            m_subWatcher->removePaths(m_subWatcher->directories());
-            // 添加新的监控
-            m_subWatcher->addPath(filePathToMonitor);
-            // 更新当前子文件夹路径
-            m_currentSubDir = filePathToMonitor;
-            // 清空已处理文件集合，准备处理新文件夹中的文件
-            m_processedFiles.clear();
-            // 发出信号，通知外部最新子文件夹已切换
-            emit subDirChanged(filePathToMonitor);
+            for (int i = 0; i < maxRetries; ++i) {
+                if (QFileInfo::exists(filePathToMonitor)) {
+                    fileExists = true;
+                    break;
+                }
+                QThread::msleep(retryDelayMs);
+            }
+
+            if (!fileExists) {
+                qCritical() << "Error: File" << filePathToMonitor << "still not found after" << maxRetries << "attempts. Aborting.";
+                return;
+            }
+
+            if (m_currentSubDir != filePathToMonitor) {
+                qDebug() << "Detected new newest sub-directory:" << filePathToMonitor;
+                m_subWatcher->removePaths(m_subWatcher->directories());
+                m_subWatcher->addPath(filePathToMonitor);
+                m_currentSubDir = filePathToMonitor;
+                m_processedFiles.clear();
+                emit subDirChanged(filePathToMonitor);
+            }
         }
     }
-    // 即使没有切换，也发出主目录变化信号（如果需要）
     emit mainDirChanged(path);
 }
 
 void FileMonitor::onSubdirectoryChanged(const QString& path) {
+    if (m_isGMTIMonitoring) {
+        return; // GMTI模式不处理子文件夹变化
+    }
     QDir dir(path);
     QStringList currentFiles = dir.entryList(QStringList("*.tif"), QDir::Files | QDir::NoDotAndDotDot);
 
-    // 找出新增的文件
     for (const QString& fileName : currentFiles) {
         QString fullPath = dir.filePath(fileName);
         if (!m_processedFiles.contains(fullPath)) {
-            // 这是新文件，发出信号并添加到已处理集合
             qDebug() << "New .tif file detected:" << fullPath;
-            emit newTifFileDetected(fullPath);
+            emit newFileDetected(fullPath);
             m_processedFiles.insert(fullPath);
         }
     }

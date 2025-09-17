@@ -13,6 +13,217 @@
 #include <QCoreApplication>
 #include <QThread>
 
+/**
+ * @brief Processes and transfers GMTI data.
+ *
+ * This function takes a GMTI-related .bin file and orchestrates its processing and transfer.
+ * It finds corresponding .txt (for coordinates) and .png (for image) files,
+ * packages them into a new structured .bin file, and then transfers it over TCP.
+ *
+ * @param filePath Path to the input .bin file.
+ * @param ipAddress The destination IP address for the transfer.
+ * @param port The destination port.
+ * @param image_num A sequential number for the image packet.
+ * @return An ImageTransferResult indicating the success or failure of the operation.
+ */
+ImageTransferResult processAndTransferGMTI(const QString &filePath, const QString &ipAddress, quint16 port, uint16_t image_num)
+{
+    ImageTransferResult result;
+    result.success = false;
+
+    // 1.  derive file paths and verify existence
+    QFileInfo imageFileInfo(filePath);
+    if (imageFileInfo.suffix().toLower() != "png" && imageFileInfo.suffix().toLower() != "jpg" && imageFileInfo.suffix().toLower() != "tif") {
+        result.message = QString("Input file %1 is not a image file, skip.").arg(filePath);
+        qWarning() << result.message;
+        return result;
+    }
+
+    QString baseName = imageFileInfo.baseName();
+    QString dirPath = imageFileInfo.path();
+    QString txtPath = dirPath + QDir::separator() + baseName + ".txt";
+    QString binPath = dirPath + QDir::separator() + baseName + ".bin";
+
+    // 新增：为 .txt 和 .png 文件添加等待和重试机制
+    const int MAX_RETRIES = 10;
+    const int RETRY_DELAY_MS = 500;
+    int retries = 0;
+
+    // 等待 .txt 文件
+    while (!QFileInfo::exists(txtPath) && retries < MAX_RETRIES) {
+        // qDebug() << QString("Required .txt file not found: %1. Retrying... (%2/%3)").arg(txtPath).arg(retries + 1).arg(MAX_RETRIES);
+        QThread::msleep(RETRY_DELAY_MS);
+        retries++;
+    }
+    if (!QFileInfo::exists(txtPath)) {
+        result.message = QString("Required .txt file not found after %1 retries: %2").arg(MAX_RETRIES).arg(txtPath);
+        qWarning() << result.message;
+        return result;
+    }
+
+    // 重置重试计数器并等待 .bin 文件
+    retries = 0;
+    while (!QFileInfo::exists(binPath) && retries < MAX_RETRIES) {
+        // qDebug() << QString("Required .bin file not found: %1. Retrying... (%2/%3)").arg(binPath).arg(retries + 1).arg(MAX_RETRIES);
+        QThread::msleep(RETRY_DELAY_MS);
+        retries++;
+    }
+    if (!QFileInfo::exists(binPath)) {
+        result.message = QString("Required .bin file not found after %1 retries: %2").arg(MAX_RETRIES).arg(binPath);
+        qWarning() << result.message;
+        return result;
+    }
+
+    // 2. Parse the TXT file for coordinates
+    QMap<QString, double> coords;
+    QFile txtFile(txtPath);
+    if (!txtFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        result.message = QString("Failed to open .txt file: %1").arg(txtPath);
+        qWarning() << result.message;
+        return result;
+    }
+
+    QTextStream in(&txtFile);
+    while (!in.atEnd()) {
+        QString line = in.readLine();
+        QStringList parts = line.split('=');
+        if (parts.size() == 2) {
+            bool ok;
+            QString key = parts[0].trimmed();
+            double value = parts[1].trimmed().toDouble(&ok);
+            if (ok) {
+                coords[key] = value;
+            } else {
+                qWarning() << "Could not parse value for key" << key << "in file" << txtPath;
+            }
+        }
+    }
+    txtFile.close();
+
+    // Verify all needed coordinates were parsed
+    QStringList requiredKeys = {"B0", "L0", "B1", "L1", "B2", "L2", "B3", "L3"};
+    for (const QString& key : requiredKeys) {
+        if (!coords.contains(key)) {
+            result.message = QString("Missing required key '%1' in file %2").arg(key).arg(txtPath);
+            qWarning() << result.message;
+            return result;
+        }
+    }
+
+    // 3. Read BIN and PNG data into buffers
+    QFile originalBinFile(binPath);
+    if (!originalBinFile.open(QIODevice::ReadOnly)) {
+        result.message = "Failed to open original BIN file: " + filePath;
+        qWarning() << result.message;
+        return result;
+    }
+    QByteArray originalBinData = originalBinFile.readAll();
+    originalBinFile.close();
+
+    QFile pngFile(filePath);
+    if (!pngFile.open(QIODevice::ReadOnly)) {
+        result.message = "Failed to open PNG file: " + binPath;
+        qWarning() << result.message;
+        return result;
+    }
+    QByteArray pngData = pngFile.readAll();
+    pngFile.close();
+
+    // 4. Populate SAR_DataInfo structure
+    SAR_DataInfo dataInfo;
+    memset(&dataInfo, 0, sizeof(SAR_DataInfo));
+
+    const double QUANTIZER = 8.38191e-8;
+    dataInfo.frame_header = 0x55AA;
+    dataInfo.message_type = 0x0003; // Using 0x0003 to signify GMTI data type
+    dataInfo.message_count = image_num;
+    dataInfo.image_available_flag = 0xFFFF;
+
+    // B/L mapping: 0=TL, 1=BR, 2=TR, 3=BL
+    dataInfo.top_left_lng      = static_cast<int32_t>(round(coords.value("L0") / QUANTIZER));
+    dataInfo.top_left_lat      = static_cast<int32_t>(round(coords.value("B0") / QUANTIZER));
+    dataInfo.bottom_right_lng  = static_cast<int32_t>(round(coords.value("L1") / QUANTIZER));
+    dataInfo.bottom_right_lat  = static_cast<int32_t>(round(coords.value("B1") / QUANTIZER));
+    dataInfo.top_right_lng     = static_cast<int32_t>(round(coords.value("L2") / QUANTIZER));
+    dataInfo.top_right_lat     = static_cast<int32_t>(round(coords.value("B2") / QUANTIZER));
+    dataInfo.bottom_left_lng   = static_cast<int32_t>(round(coords.value("L3") / QUANTIZER));
+    dataInfo.bottom_left_lat   = static_cast<int32_t>(round(coords.value("B3") / QUANTIZER));
+
+    // Calculate total length and checksum
+    dataInfo.data_length = sizeof(SAR_DataInfo) + originalBinData.size() + pngData.size();
+    uint8_t* ptr = reinterpret_cast<uint8_t*>(&dataInfo);
+    dataInfo.checksum = calculate_checksum(ptr + sizeof(uint16_t), sizeof(SAR_DataInfo) - sizeof(uint16_t) - sizeof(uint8_t));
+
+    // 5. Assemble the full message payload
+    QByteArray fullMessage;
+    fullMessage.append(reinterpret_cast<const char*>(&dataInfo), sizeof(SAR_DataInfo));
+    fullMessage.append(originalBinData);
+    fullMessage.append(pngData);
+
+    // 6. Create the new transmittable BIN file with SAR_Frame headers
+    QString outputBinFilePath = dirPath + QDir::separator() + baseName + "_gmti_packaged.bin";
+    QFile transmitBinFile(outputBinFilePath);
+    if (!transmitBinFile.open(QIODevice::WriteOnly)) {
+        result.message = "Failed to create temporary bin file for transmission: " + outputBinFilePath;
+        qWarning() << result.message;
+        return result;
+    }
+
+    const qint64 payloadChunkSize = 4096;
+    qint64 totalPackets = (fullMessage.size() + payloadChunkSize - 1) / payloadChunkSize;
+    qint64 currentOffset = 0;
+
+    for (int i = 0; i < totalPackets; ++i) {
+        SAR_Frame header;
+        memset(&header, 0, sizeof(SAR_Frame));
+
+        qint64 payloadSize = qMin(payloadChunkSize, fullMessage.size() - currentOffset);
+        QByteArray payload = fullMessage.mid(currentOffset, payloadSize);
+
+        header.fixed_value = 0x90E9;
+        header.image_number = image_num;
+        header.image_size = pngData.size(); // The image part is the PNG data
+        header.current_packet = i + 1;
+        header.total_packets = totalPackets;
+        header.data_length = payloadSize;
+        header.checksum = calculate_checksum(reinterpret_cast<const uint8_t*>(payload.constData()), payload.size());
+
+        transmitBinFile.write(reinterpret_cast<const char*>(&header), sizeof(SAR_Frame));
+        transmitBinFile.write(payload);
+
+        currentOffset += payloadSize;
+    }
+    transmitBinFile.close();
+    qDebug() << "Successfully created GMTI package file:" << outputBinFilePath;
+
+    // 7. Start the online transfer
+    SarPacketTransferManager transferManager;
+    QEventLoop loop;
+    bool transferSuccess = false;
+    QString transferMessage;
+
+    QObject::connect(&transferManager, &SarPacketTransferManager::finished,
+                     [&](bool success) {
+                         transferSuccess = success;
+                         transferMessage = success ? "GMTI transfer completed successfully." : "GMTI transfer failed.";
+                         loop.quit();
+                     });
+
+    qDebug() << "Starting GMTI online transfer...";
+    transferManager.startTransfer(outputBinFilePath, ipAddress, port);
+    loop.exec();
+
+    result.success = transferSuccess;
+    result.message = transferMessage;
+
+    // Optional: clean up the temporary file
+    if (QFile::exists(outputBinFilePath)) {
+        QFile::remove(outputBinFilePath);
+    }
+
+    return result;
+}
+
 ImageTransferResult processAndTransferImage(const QString &filePath, const QString &ipAddress, quint16 port, uint16_t image_num)
 {
     ImageTransferResult result;
@@ -71,7 +282,7 @@ ImageTransferResult processAndTransferImage(const QString &filePath, const QStri
     const int AUX_RETRY_DELAY_MS = 500;
     int auxRetries = 0;
     while (!QFileInfo::exists(auxPath) && auxRetries < MAX_AUX_RETRIES) {
-        qDebug() << QString("AUX file %1 not found. Retrying... (%2/%3)").arg(auxPath).arg(auxRetries + 1).arg(MAX_AUX_RETRIES);
+        // qDebug() << QString("AUX file %1 not found. Retrying... (%2/%3)").arg(auxPath).arg(auxRetries + 1).arg(MAX_AUX_RETRIES);
         QThread::msleep(AUX_RETRY_DELAY_MS);
         auxRetries++;
     }
@@ -121,6 +332,7 @@ ImageTransferResult processAndTransferImage(const QString &filePath, const QStri
 
     return result;
 }
+
 
 ImageTransferResult processAndTransferManualImage(const QString &tifFilePath, const QString &auxFilePath, const QString &ipAddress, quint16 port, uint16_t image_num)
 {

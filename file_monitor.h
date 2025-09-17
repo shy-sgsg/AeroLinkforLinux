@@ -1,4 +1,6 @@
-#pragma once
+#ifndef FILE_MONITOR_H
+#define FILE_MONITOR_H
+
 #include <QObject>
 #include <QFileSystemWatcher>
 #include <QString>
@@ -10,12 +12,12 @@ class FileMonitor : public QObject {
 public:
     explicit FileMonitor(QObject* parent = nullptr);
     void setMainFolder(const QString& folderPath);
-    void start();
+    void start(bool isGMTIMonitoring); // ✅ 修改: 增加参数以选择监控模式
     void stop();
     QString getCurrentSubDir() const;
 
 signals:
-    void newTifFileDetected(const QString& tifPath);
+    void newFileDetected(const QString& filePath);
     void mainDirChanged(const QString& mainDir);
     void subDirChanged(const QString& subDir);
 
@@ -29,4 +31,8 @@ private:
     QString m_mainFolderPath;
     QString m_currentSubDir;
     QSet<QString> m_processedFiles;
+    QSet<QString> m_processedBinFiles; // ✅ 新增：用于跟踪GMTI模式下已处理的bin文件
+    bool m_isGMTIMonitoring = false; // ✅ 新增：用于区分监控模式
 };
+
+#endif // FILE_MONITOR_H
